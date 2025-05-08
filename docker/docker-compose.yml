@@ -1,0 +1,111 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  env_file: ../.env
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../scripts:/opt/airflow/scripts
+    - ../logs:/opt/airflow/logs
+  depends_on: &airflow-common-depends-on
+    airflow-db:
+      condition: service_healthy
+  user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-0}"
+
+services:
+  airflow-db:
+    image: postgres:14
+    container_name: airflow-db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - airflow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 30
+    restart: always
+
+  postgres-1:
+    image: postgres:14
+    container_name: postgres-1
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: orders_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata1:/var/lib/postgresql/data
+      - ../scripts/init_orders.sql:/docker-entrypoint-initdb.d/init_orders.sql
+
+  postgres-2:
+    image: postgres:14
+    container_name: postgres-2
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: orders_eur_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata2:/var/lib/postgresql/data
+      - ../scripts/init_orders_eur.sql:/docker-entrypoint-initdb.d/init_orders_eur.sql
+
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        until pg_isready -h airflow-db -U "${POSTGRES_USER:-airflow}"; do sleep 5; done
+        airflow db upgrade
+
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email my@email.com \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-airflow}"
+
+        python /opt/airflow/scripts/load_connections.py
+
+        exit 0
+    environment:
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    depends_on:
+      <<: *airflow-common-depends-on
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow_pgdata:
+  pgdata1:
+  pgdata2:
